@@ -1,6 +1,5 @@
 /*
  * Copyright 2006, The Android Open Source Project
- * Copyright (c) 2010, Code Aurora Forum. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -138,13 +137,15 @@ FILE* gRenderTreeFile = 0;
 #include "TimeCounter.h"
 #endif
 
-#ifdef CACHED_IMAGE_DECODE
-#include "ImageDecodeThread.h"
-#endif
-
 #if USE(ACCELERATED_COMPOSITING)
 #include "GraphicsLayerAndroid.h"
 #include "RenderLayerCompositor.h"
+#endif
+
+
+
+#if ENABLE(ACCELERATED_SCROLLING)
+#include "Renderer.h"
 #endif
 
 /*  We pass this flag when recording the actual content, so that we don't spend
@@ -322,6 +323,11 @@ WebViewCore::WebViewCore(JNIEnv* env, jobject javaWebViewCore, WebCore::Frame* m
     m_isPaused = false;
     m_invertColor = false;
 
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    m_scrollRenderer = Renderer::createRenderer();
+#endif
+
     LOG_ASSERT(m_mainFrame, "Uh oh, somehow a frameview was made without an initial frame!");
 
     jclass clazz = env->GetObjectClass(javaWebViewCore);
@@ -330,7 +336,7 @@ WebViewCore::WebViewCore(JNIEnv* env, jobject javaWebViewCore, WebCore::Frame* m
     m_javaGlue->m_spawnScrollTo = GetJMethod(env, clazz, "contentSpawnScrollTo", "(II)V");
     m_javaGlue->m_scrollTo = GetJMethod(env, clazz, "contentScrollTo", "(II)V");
     m_javaGlue->m_scrollBy = GetJMethod(env, clazz, "contentScrollBy", "(IIZ)V");
-    m_javaGlue->m_contentDraw = GetJMethod(env, clazz, "contentDraw", "()V");
+    m_javaGlue->m_contentDraw = GetJMethod(env, clazz, "contentDraw", "(Z)V");
     m_javaGlue->m_requestListBox = GetJMethod(env, clazz, "requestListBox", "([Ljava/lang/String;[I[I)V");
     m_javaGlue->m_openFileChooser = GetJMethod(env, clazz, "openFileChooser", "()Ljava/lang/String;");
     m_javaGlue->m_requestSingleListBox = GetJMethod(env, clazz, "requestListBox", "([Ljava/lang/String;[II)V");
@@ -378,20 +384,13 @@ WebViewCore::WebViewCore(JNIEnv* env, jobject javaWebViewCore, WebCore::Frame* m
     PageGroup::setShouldTrackVisitedLinks(true);
 
     reset(true);
-#ifdef CACHED_IMAGE_DECODE
-    m_imageDecodeThread = ImageDecodeThread::create(this);
-    m_imageDecodeThread->start();
-#endif
+
     WebViewCore::addInstance(this);
 }
 
 WebViewCore::~WebViewCore()
 {
     WebViewCore::removeInstance(this);
-#ifdef CACHED_IMAGE_DECODE
-    m_imageDecodeThread->terminate();
-    m_imageDecodeThread = 0;
-#endif
 
     // Release the focused view
     Release(m_popupReply);
@@ -404,6 +403,10 @@ WebViewCore::~WebViewCore()
     delete m_javaGlue;
     delete m_frameCacheKit;
     delete m_navPictureKit;
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    m_scrollRenderer->release();
+#endif
 }
 
 WebViewCore* WebViewCore::getWebViewCore(const WebCore::FrameView* view)
@@ -776,6 +779,10 @@ void WebViewCore::clearContent()
     DBG_SET_LOG("");
     m_contentMutex.lock();
     m_content.clear();
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    m_scrollRenderer->clearContent();
+#endif
     m_contentMutex.unlock();
     m_addInval.setEmpty();
     m_rebuildInval.setEmpty();
@@ -784,6 +791,10 @@ void WebViewCore::clearContent()
 void WebViewCore::copyContentToPicture(SkPicture* picture)
 {
     DBG_SET_LOG("start");
+#if ENABLE(ACCELERATED_SCROLLING)
+    if (m_scrollRenderer)
+        m_scrollRenderer->finish();
+#endif
     m_contentMutex.lock();
     PictureSet copyContent = PictureSet(m_content);
     m_contentMutex.unlock();
@@ -801,27 +812,48 @@ bool WebViewCore::drawContent(SkCanvas* canvas, SkColor color)
     TimeCounterAuto counter(TimeCounter::WebViewUIDrawTimeCounter);
 #endif
     DBG_SET_LOG("start");
+
     m_contentMutex.lock();
     PictureSet copyContent = PictureSet(m_content);
     m_contentMutex.unlock();
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    bool split = false;
+    if (!m_scrollRenderer->drawContent(canvas, color,
+#if ENABLE(COLOR_INVERSION)
+        m_invertColor,
+#else
+        false,
+#endif
+        copyContent, split))
+    {
+#endif //ACCELERATED_SCROLLING
+
     int sc = canvas->save(SkCanvas::kClip_SaveFlag);
     SkRect clip;
     clip.set(0, 0, copyContent.width(), copyContent.height());
     canvas->clipRect(clip, SkRegion::kDifference_Op);
     canvas->drawColor(color);
     canvas->restoreToCount(sc);
+#if ENABLE(COLOR_INVERSION)
     bool tookTooLong = copyContent.draw(canvas, m_invertColor);
-    m_contentMutex.lock();
-    m_content.setDrawTimes(copyContent);
-    m_contentMutex.unlock();
+#else
+    bool tookTooLong = copyContent.draw(canvas);
+#endif //COLOR_INVERSION
+#if !ENABLE(ACCELERATED_SCROLLING)
     DBG_SET_LOG("end");
-
-#ifdef CACHED_IMAGE_DECODE
-    WTF::Vector<const SkBitmap*> bitmaps = copyContent.getBitmapsForDecoding();
-    if (!bitmaps.isEmpty())
-        m_imageDecodeThread->scheduleDecodeBitmaps(bitmaps, copyContent.getBitmapRectsForDecoding());
-#endif
     return tookTooLong;
+#else //ACCELERATED_SCROLLING
+    }
+    else
+    {
+        m_contentMutex.lock();
+        m_content.setDrawTimes(copyContent);
+        m_contentMutex.unlock();
+    }
+    DBG_SET_LOG("end");
+    return split;
+#endif //ACCELERATED_SCROLLING
 }
 
 bool WebViewCore::focusBoundsChanged()
@@ -910,6 +942,13 @@ bool WebViewCore::recordContent(SkRegion* region, SkIPoint* point)
     m_contentMutex.lock();
     contentCopy.setDrawTimes(m_content);
     m_content.set(contentCopy);
+
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    WebCore::FrameLoader* loader = m_mainFrame->loader();
+    bool loading = (!loader)? false : loader->isLoading();
+    m_scrollRenderer->setContent(m_content, region, loading);
+#endif
     point->fX = m_content.width();
     point->fY = m_content.height();
     m_contentMutex.unlock();
@@ -931,6 +970,10 @@ void WebViewCore::splitContent()
     rebuildPictureSet(&tempPictureSet);
     m_contentMutex.lock();
     m_content.set(tempPictureSet);
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    m_scrollRenderer->setContent(m_content, 0, false);
+#endif
     m_contentMutex.unlock();
 }
 
@@ -997,14 +1040,14 @@ void WebViewCore::setUIRootLayer(const LayerAndroid* layer)
 
 #endif // USE(ACCELERATED_COMPOSITING)
 
-void WebViewCore::contentDraw()
+void WebViewCore::contentDraw(bool paintHeader)
 {
     JNIEnv* env = JSC::Bindings::getJNIEnv();
-    env->CallVoidMethod(m_javaGlue->object(env).get(), m_javaGlue->m_contentDraw);
+    env->CallVoidMethod(m_javaGlue->object(env).get(), m_javaGlue->m_contentDraw, paintHeader);
     checkException(env);
 }
 
-void WebViewCore::contentInvalidate(const WebCore::IntRect &r)
+void WebViewCore::contentInvalidate(const WebCore::IntRect &r, bool paintHeader)
 {
     DBG_SET_LOGD("rect={%d,%d,w=%d,h=%d}", r.x(), r.y(), r.width(), r.height());
     SkIRect rect(r);
@@ -1015,7 +1058,7 @@ void WebViewCore::contentInvalidate(const WebCore::IntRect &r)
         m_addInval.getBounds().fLeft, m_addInval.getBounds().fTop,
         m_addInval.getBounds().fRight, m_addInval.getBounds().fBottom);
     if (!m_skipContentDraw)
-        contentDraw();
+        contentDraw(paintHeader);
 }
 
 void WebViewCore::offInvalidate(const WebCore::IntRect &r)
@@ -3144,6 +3187,10 @@ static void Pause(JNIEnv* env, jobject obj)
     GET_NATIVE_VIEW(env, obj)->sendPluginEvent(event);
 
     GET_NATIVE_VIEW(env, obj)->setIsPaused(true);
+
+#if ENABLE(ACCELERATED_SCROLLING)
+    GET_NATIVE_VIEW(env, obj)->m_scrollRenderer->pause();
+#endif
 }
 
 static void Resume(JNIEnv* env, jobject obj)

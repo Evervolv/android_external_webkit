@@ -64,6 +64,10 @@ ifneq ($(JAVASCRIPT_ENGINE),jsc)
   endif
 endif
 
+ifeq ($(WEBCORE_ACCELERATED_SCROLLING),true)
+        WEBCORE_WEBKITACCEL := true
+endif
+
 BASE_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
@@ -173,6 +177,11 @@ LOCAL_C_INCLUDES := $(LOCAL_C_INCLUDES) \
 	$(base_intermediates)/WebCore/html \
 	$(base_intermediates)/WebCore/platform
 
+ifeq ($(WEBCORE_ACCELERATED_SCROLLING),true)
+LOCAL_C_INCLUDES := $(LOCAL_C_INCLUDES) \
+	vendor/qcom/opensource/webkit/BackingStore
+endif
+
 ifeq ($(JAVASCRIPT_ENGINE),v8)
 # Include WTF source file.
 d := JavaScriptCore
@@ -223,10 +232,6 @@ LOCAL_CFLAGS += -fno-strict-aliasing
 LOCAL_CFLAGS += -include "WebCorePrefix.h"
 LOCAL_CFLAGS += -fvisibility=hidden
 
-# Comment this line below to disable the ImageDecode thread which
-# caches decoded images.
-LOCAL_CFLAGS += -DCACHED_IMAGE_DECODE
-
 # Enable JSC JIT if JSC is used and ENABLE_JSC_JIT environment
 # variable is set to true
 ifeq ($(JAVASCRIPT_ENGINE),jsc)
@@ -268,6 +273,10 @@ ifeq ($(WEBCORE_INSTRUMENTATION),true)
 LOCAL_CFLAGS += -DANDROID_INSTRUMENT
 endif
 
+ifeq ($(WEBCORE_ACCELERATED_SCROLLING),true)
+LOCAL_CFLAGS += -DENABLE_ACCELERATED_SCROLLING
+endif
+
 # LOCAL_LDLIBS is used in simulator builds only and simulator builds are only
 # valid on Linux
 LOCAL_LDLIBS += -lpthread -ldl
@@ -288,6 +297,10 @@ LOCAL_SHARED_LIBRARIES := \
 
 ifeq ($(WEBCORE_INSTRUMENTATION),true)
 LOCAL_SHARED_LIBRARIES += libhardware_legacy
+endif
+
+ifeq ($(WEBCORE_ACCELERATED_SCROLLING),true)
+LOCAL_SHARED_LIBRARIES += libwebkitaccel
 endif
 
 # We have to use the android version of libdl when we are not on the simulator
