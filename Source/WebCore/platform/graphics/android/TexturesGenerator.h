@@ -56,6 +56,7 @@ public:
     void removeOperationsForFilter(OperationFilter* filter, bool waitForRunning);
 
     void scheduleOperation(QueuedOperation* operation);
+    int m_threadID;
 
 private:
     QueuedOperation* popNext();
